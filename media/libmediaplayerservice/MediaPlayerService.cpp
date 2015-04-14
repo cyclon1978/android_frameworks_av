@@ -457,6 +457,9 @@ status_t MediaPlayerService::dump(int fd, const Vector<String16>& args)
     const size_t SIZE = 256;
     char buffer[SIZE];
     String8 result;
+    SortedVector< sp<Client> > clients; //to serialise the mutex unlock & client destruction.
+    SortedVector< sp<MediaRecorderClient> > mediaRecorderClients;
+
     if (checkCallingPermission(String16("android.permission.DUMP")) == false) {
         snprintf(buffer, SIZE, "Permission Denial: "
                 "can't dump MediaPlayerService from pid=%d, uid=%d\n",
@@ -468,6 +471,7 @@ status_t MediaPlayerService::dump(int fd, const Vector<String16>& args)
         for (int i = 0, n = mClients.size(); i < n; ++i) {
             sp<Client> c = mClients[i].promote();
             if (c != 0) c->dump(fd, args);
+            clients.add(c);
         }
         if (mMediaRecorderClients.size() == 0) {
                 result.append(" No media recorder client\n\n");
@@ -480,6 +484,7 @@ status_t MediaPlayerService::dump(int fd, const Vector<String16>& args)
                     write(fd, result.string(), result.size());
                     result = "\n";
                     c->dump(fd, args);
+                    mediaRecorderClients.add(c);
                 }
             }
         }
@@ -491,6 +496,7 @@ status_t MediaPlayerService::dump(int fd, const Vector<String16>& args)
             while (!feof(f)) {
                 fgets(buffer, SIZE, f);
                 if (strstr(buffer, " /storage/") ||
+                    strstr(buffer, " /mnt/sdcard/") ||
                     strstr(buffer, " /system/sounds/") ||
                     strstr(buffer, " /data/") ||
                     strstr(buffer, " /system/media/")) {
@@ -527,6 +533,7 @@ status_t MediaPlayerService::dump(int fd, const Vector<String16>& args)
                                     linkto[len] = 0;
                                 }
                                 if (strstr(linkto, "/storage/") == linkto ||
+                                    strstr(linkto, "/mnt/sdcard/") == linkto ||
                                     strstr(linkto, "/system/sounds/") == linkto ||
                                     strstr(linkto, "/data/") == linkto ||
                                     strstr(linkto, "/system/media/") == linkto) {
@@ -1649,7 +1656,12 @@ status_t MediaPlayerService::AudioOutput::open(
                              CallbackWrapper,
                              newcbd,
                              0,
-                             mSessionId);
+                             mSessionId,
+                             AudioTrack::TRANSFER_DEFAULT,
+                             NULL,
+                             -1,
+                             -1,
+                             mAttributes);
             if ((audioTrack == 0) || (audioTrack->initCheck() != NO_ERROR)) {
                 ALOGE("Unable to create audio track");
                 delete audioTrack;
@@ -1662,6 +1674,7 @@ status_t MediaPlayerService::AudioOutput::open(
         }
         deleteRecycledTrack();
 
+        mStreamType = audioTrack->streamType();
         ALOGV("setVolume");
         mCallbackData = newcbd;
         audioTrack->setVolume(mLeftVolume, mRightVolume);
@@ -2227,7 +2240,12 @@ status_t MediaPlayerService::AudioCache::open(
     mMsecsPerFrame = 1.e3 / (float) sampleRate;
     mFrameSize =  audio_is_linear_pcm(mFormat)
             ? mChannelCount * audio_bytes_per_sample(mFormat) : 1;
-    mFrameCount = mHeap->getSize() / mFrameSize;
+
+    if (cb == NULL) {
+        // Use buffer of size equal to that of the heap if AudioCache used by NuPlayer.
+        // Otherwise use default buffersize.
+        mFrameCount = mHeap->getSize() / mFrameSize;
+    }
 
     if (cb != NULL) {
         mCallbackThread = new CallbackThread(this, cb, cookie);

@@ -106,7 +106,7 @@ LOCAL_SHARED_LIBRARIES := \
         libvorbisidec \
         libz \
         libpowermanager \
-        libjpeg
+        libjpeg \
 
 ifeq ($(BOARD_USES_QCOM_HARDWARE),true)
 ifneq ($(filter msm7x30 msm8660 msm8960,$(TARGET_BOARD_PLATFORM)),)
@@ -168,6 +168,28 @@ ifeq ($(strip $(AUDIO_FEATURE_ENABLED_FLAC_OFFLOAD)),true)
        LOCAL_CFLAGS     += -DFLAC_OFFLOAD_ENABLED
 endif
 
+endif
+
+ifeq ($(BOARD_USE_S3D_SUPPORT), true)
+ifeq ($(BOARD_USES_HWC_SERVICES), true)
+LOCAL_CFLAGS += -DUSE_S3D_SUPPORT -DHWC_SERVICES
+LOCAL_C_INCLUDES += \
+        $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include \
+        $(TOP)/hardware/samsung_slsi/openmax/include/exynos \
+        $(TOP)/hardware/samsung_slsi/$(TARGET_BOARD_PLATFORM)-insignal/libhwcService \
+        $(TOP)/hardware/samsung_slsi/$(TARGET_BOARD_PLATFORM)-insignal/libhwc \
+        $(TOP)/hardware/samsung_slsi/$(TARGET_BOARD_PLATFORM)-insignal/include \
+        $(TOP)/hardware/samsung_slsi/$(TARGET_SOC)/libhwcmodule \
+        $(TOP)/hardware/samsung_slsi/$(TARGET_SOC)/include \
+        $(TOP)/hardware/samsung_slsi/exynos/libexynosutils \
+        $(TOP)/hardware/samsung_slsi/exynos/include
+
+LOCAL_ADDITIONAL_DEPENDENCIES := \
+        $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
+
+LOCAL_SHARED_LIBRARIES += \
+        libExynosHWCService
+endif
 endif
 
 LOCAL_SHARED_LIBRARIES += \

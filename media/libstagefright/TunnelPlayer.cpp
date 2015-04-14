@@ -37,6 +37,8 @@
 #include <media/stagefright/MediaErrors.h>
 #include "include/AwesomePlayer.h"
 #include <cutils/properties.h>
+#include <media/openmax/OMX_Audio.h>
+#include <media/stagefright/Utils.h>
 
 static const char   mName[] = "TunnelPlayer";
 #define MEM_METADATA_SIZE 64
@@ -168,7 +170,13 @@ status_t TunnelPlayer::start(bool sourceAlreadyStarted) {
     const char *mime;
     bool success = format->findCString(kKeyMIMEType, &mime);
     if (!strcasecmp(mime,MEDIA_MIMETYPE_AUDIO_AAC)) {
-        mFormat = AUDIO_FORMAT_AAC;
+        int32_t aacaot = -1;
+        if(format->findInt32(kKeyAACAOT, &aacaot))
+            mapAACProfileToAudioFormat(mFormat,(OMX_AUDIO_AACPROFILETYPE) aacaot);
+        else
+            mFormat = AUDIO_FORMAT_AAC;
+
+        ALOGD("TunnelPlayer::start AUDIO_FORMAT_AAC");
     }
     else if (!strcasecmp(mime,MEDIA_MIMETYPE_AUDIO_MPEG)) {
         mFormat = AUDIO_FORMAT_MP3;
@@ -203,6 +211,12 @@ status_t TunnelPlayer::start(bool sourceAlreadyStarted) {
         flags,
         NULL);
 
+    if(mAudioSink->getAudioStreamType() != AUDIO_STREAM_MUSIC) {
+       ALOGV("Tunnel Player is not used for non-music stream");
+       mIsAudioRouted = true;
+       err = INVALID_OPERATION;
+    }
+
     if (err != OK) {
         if (mFirstBuffer != NULL) {
             mFirstBuffer->release();
@@ -212,6 +226,7 @@ status_t TunnelPlayer::start(bool sourceAlreadyStarted) {
         if (!sourceAlreadyStarted) {
             mSource->stop();
         }
+
 
         ALOGE("Opening a routing session failed");
         return err;

@@ -63,11 +63,6 @@ status_t MediaPlayerFactory::registerFactory_l(IFactory* factory,
 
 static player_type getDefaultPlayerType() {
     char value[PROPERTY_VALUE_MAX];
-    if (property_get("media.stagefright.use-awesome", value, NULL)
-            && (!strcmp("1", value) || !strcasecmp("true", value))) {
-        return STAGEFRIGHT_PLAYER;
-    }
-
     // TODO: remove this EXPERIMENTAL developer settings property
     if (property_get("persist.sys.media.use-awesome", value, NULL)
             && !strcasecmp("true", value)) {
@@ -233,6 +228,11 @@ class NuPlayerFactory : public MediaPlayerFactory::IFactory {
         }
 
         if (!strncasecmp("rtsp://", url, 7)) {
+            return kOurScore;
+        }
+
+        if (!strncasecmp("http://", url, 7)
+                || !strncasecmp("https://", url, 8)) {
             return kOurScore;
         }
 

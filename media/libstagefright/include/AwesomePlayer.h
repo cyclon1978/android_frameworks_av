@@ -114,6 +114,9 @@ struct AwesomePlayer {
     void postAudioSeekComplete();
     void postAudioTearDown();
     void printFileName(int fd);
+#ifdef MTK_HARDWARE
+    void mtk_omx_get_current_time(int64_t* pReal_time);
+#endif
 
     status_t dump(int fd, const Vector<String16> &args) const;
 
@@ -401,7 +404,7 @@ private:
     bool    mAudioTearDown;
     bool    mAudioTearDownWasPlaying;
     int64_t mAudioTearDownPosition;
-
+    bool mConsumeRights;
     status_t setVideoScalingMode(int32_t mode);
     status_t setVideoScalingMode_l(int32_t mode);
     status_t getTrackInfo(Parcel* reply) const;
@@ -423,6 +426,9 @@ private:
 
     AwesomePlayer(const AwesomePlayer &);
     AwesomePlayer &operator=(const AwesomePlayer &);
+#ifdef MTK_HARDWARE
+    int64_t mAVSyncTimeUs;
+#endif
 };
 
 }  // namespace android

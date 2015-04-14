@@ -45,12 +45,15 @@
 #include <media/stagefright/MediaExtractor.h>
 #include <media/MediaProfiles.h>
 #include <media/stagefright/Utils.h>
+#include <camera/ICamera.h>
+#include <binder/IPCThreadState.h>
 
 //RTSPStream
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netdb.h>
 
+#include "include/avc_utils.h"
 #include "include/ExtendedUtils.h"
 
 #include <system/window.h>
@@ -72,6 +75,10 @@ static const unsigned kMinRtpPort = 1024;
 static const unsigned kMaxRtpPort = 65535;
 
 #define ARG_TOUCH(x) (void)x
+
+static const uint8_t kHEVCNalUnitTypeIDR         = 0x13;
+static const uint8_t kHEVCNalUnitTypeIDRNoLP     = 0x14;
+static const uint8_t kHEVCNalUnitTypeCRA         = 0x15;
 static const uint8_t kHEVCNalUnitTypeVidParamSet = 0x20;
 static const uint8_t kHEVCNalUnitTypeSeqParamSet = 0x21;
 static const uint8_t kHEVCNalUnitTypePicParamSet = 0x22;
@@ -722,6 +729,55 @@ status_t ExtendedUtils::HEVCMuxer::makeHEVCCodecSpecificData(
     return OK;
 }
 
+sp<MetaData> ExtendedUtils::MakeHEVCCodecSpecificData(const sp<ABuffer> &accessUnit) {
+    const uint8_t *data = accessUnit->data();
+    size_t size = accessUnit->size();
+
+    if (data == NULL || size == 0) {
+        ALOGE("Invalid HEVC CSD");
+        return NULL;
+    }
+
+    sp<MetaData> meta = new MetaData;
+    meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_HEVC);
+    meta->setData(kKeyHVCC, kTypeHVCC, data, size);
+
+    // Set width & height to minimum (QCIF). This will trigger a port reconfig &
+    // the decoder will find the correct dimensions.
+    meta->setInt32(kKeyWidth, (int32_t)177);
+    meta->setInt32(kKeyHeight, (int32_t)144);
+
+    return meta;
+}
+
+bool ExtendedUtils::IsHevcIDR(const sp<ABuffer> &buffer) {
+    const uint8_t *data = buffer->data();
+    size_t size = buffer->size();
+
+    bool foundRef = false;
+    const uint8_t *nalStart;
+    size_t nalSize;
+    while (!foundRef && getNextNALUnit(&data, &size, &nalStart, &nalSize, true) == OK) {
+        if (nalSize == 0) {
+            ALOGW("Encountered zero-length HEVC NAL", nalSize);
+            return false;
+        }
+
+        uint8_t nalType;
+        getHEVCNalUnitType(nalStart[0], &nalType);
+
+        switch(nalType) {
+        case kHEVCNalUnitTypeIDR:
+        case kHEVCNalUnitTypeIDRNoLP:
+        case kHEVCNalUnitTypeCRA:
+            foundRef = true;
+            break;
+        }
+    }
+
+    return foundRef;
+}
+
 bool ExtendedUtils::ShellProp::isAudioDisabled(bool isEncoder) {
     bool retVal = false;
     char disableAudio[PROPERTY_VALUE_MAX];
@@ -834,6 +890,16 @@ void ExtendedUtils::ShellProp::getRtpPortRange(unsigned *start, unsigned *end) {
     }
 
     ALOGV("rtp port_start = %u, port_end = %u", *start, *end);
+}
+
+bool ExtendedUtils::ShellProp::isCustomHLSEnabled() {
+    bool retVal = false;
+    char customHLS[PROPERTY_VALUE_MAX];
+    property_get("persist.sys.media.hls-custom", customHLS, "0");
+    if (atoi(customHLS)) {
+        retVal = true;
+    }
+    return retVal;
 }
 
 void ExtendedUtils::setBFrames(
@@ -949,6 +1015,40 @@ bool ExtendedUtils::UseQCHWAACEncoder(audio_encoder Encoder,int32_t Channel,int3
     return mIsQCHWAACEncoder;
 }
 
+bool ExtendedUtils::isRAWFormat(const sp<MetaData> &meta) {
+    const char *mime = {0};
+    if (meta == NULL) {
+        return false;
+    }
+    CHECK(meta->findCString(kKeyMIMEType, &mime));
+    if (!strncasecmp(mime, MEDIA_MIMETYPE_AUDIO_RAW, 9))
+        return true;
+    else
+        return false;
+}
+
+bool ExtendedUtils::isRAWFormat(const sp<AMessage> &format) {
+    AString mime;
+    if (format == NULL) {
+        return false;
+    }
+    CHECK(format->findString("mime", &mime));
+    if (!strncasecmp(mime.c_str(), MEDIA_MIMETYPE_AUDIO_RAW, 9))
+        return true;
+    else
+        return false;
+}
+
+bool ExtendedUtils::UseQCHWAACDecoder(const char *mime) {
+    if (!strncmp(mime, MEDIA_MIMETYPE_AUDIO_AAC, strlen(MEDIA_MIMETYPE_AUDIO_AAC))) {
+        char value[PROPERTY_VALUE_MAX] = {0};
+        if (property_get("media.aaccodectype", value, 0) && (atoi(value) == 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 //- returns NULL if we dont really need a new extractor (or cannot),
 //  valid extractor is returned otherwise
@@ -987,9 +1087,9 @@ sp<MediaExtractor> ExtendedUtils::MediaExtractor_CreateIfNeeded(sp<MediaExtracto
             String8 mime = String8(_mime);
 
             const char * dolbyFormats[ ] = {
+#ifdef DOLBY_UDC
                 MEDIA_MIMETYPE_AUDIO_AC3,
                 MEDIA_MIMETYPE_AUDIO_EAC3,
-#ifdef DOLBY_UDC
                 MEDIA_MIMETYPE_AUDIO_EAC3_JOC,
 #endif
             };
@@ -1076,9 +1176,9 @@ sp<MediaExtractor> ExtendedUtils::MediaExtractor_CreateIfNeeded(sp<MediaExtracto
     const char * extFormats[ ] = {
         MEDIA_MIMETYPE_AUDIO_AMR_WB_PLUS,
         MEDIA_MIMETYPE_VIDEO_HEVC,
+#ifdef DOLBY_UDC
         MEDIA_MIMETYPE_AUDIO_AC3,
         MEDIA_MIMETYPE_AUDIO_EAC3,
-#ifdef DOLBY_UDC
         MEDIA_MIMETYPE_AUDIO_EAC3_JOC,
 #endif
         MEDIA_MIMETYPE_AUDIO_AAC,
@@ -1744,6 +1844,133 @@ bool ExtendedUtils::pcmOffloadException(const char* const mime) {
     return decision;
 }
 
+sp<MetaData> ExtendedUtils::createPCMMetaFromSource(
+                const sp<MetaData> &sMeta)
+{
+
+    sp<MetaData> tPCMMeta = new MetaData;
+    //hard code as RAW
+    tPCMMeta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_AUDIO_RAW);
+
+    int32_t bitsPerSample = 16;
+    if (!sMeta->findInt32(kKeyBitsPerSample, &bitsPerSample)) {
+        ALOGI("Bits per sample not set, default to 16");
+    }
+    tPCMMeta->setInt32(kKeyBitsPerSample, bitsPerSample);
+
+    int32_t srate = -1;
+    if (!sMeta->findInt32(kKeySampleRate, &srate)) {
+        ALOGV("No sample rate");
+    }
+    tPCMMeta->setInt32(kKeySampleRate, srate);
+
+    int32_t cmask = 0;
+    if (!sMeta->findInt32(kKeyChannelMask, &cmask) || (cmask == 0)) {
+        ALOGI("No channel mask, try channel count");
+    }
+    int32_t channelCount = 0;
+    if (!sMeta->findInt32(kKeyChannelCount, &channelCount)) {
+        ALOGI("No channel count either");
+    } else {
+        //if channel mask is not set till now, use channel count
+        //to retrieve channel count
+        if (!cmask) {
+            cmask = audio_channel_out_mask_from_count(channelCount);
+        }
+    }
+    tPCMMeta->setInt32(kKeyChannelCount, channelCount);
+    tPCMMeta->setInt32(kKeyChannelMask, cmask);
+
+    int64_t duration = INT_MAX;
+    if (!sMeta->findInt64(kKeyDuration, &duration)) {
+        ALOGW("No duration in meta setting max duration");
+    }
+    tPCMMeta->setInt64(kKeyDuration, duration);
+
+    int32_t bitRate = -1;
+    if (!sMeta->findInt32(kKeyBitRate, &bitRate)) {
+        ALOGW("No bitrate info");
+    } else {
+        tPCMMeta->setInt32(kKeyBitRate, bitRate);
+    }
+
+    return tPCMMeta;
+}
+
+void ExtendedUtils::overWriteAudioFormat(
+                sp<AMessage> &dst, const sp<AMessage> &src)
+{
+    int32_t dchannels = 0;
+    int32_t schannels = 0;
+    int32_t drate = 0;
+    int32_t srate = 0;
+    int32_t dbits = 16;
+    int32_t sbits = 16;
+
+    dst->findInt32("channel-count", &dchannels);
+    src->findInt32("channel-count", &schannels);
+
+    dst->findInt32("sample-rate", &drate);
+    src->findInt32("sample-rate", &srate);
+
+    dst->findInt32("bits-per-sample", &dbits);
+    src->findInt32("bits-per-sample", &sbits);
+
+    ALOGV("channel count src: %d dst: %d", dchannels, schannels);
+    ALOGV("sample rate src: %d dst:%d ", drate, srate);
+    ALOGV("bits per sample src: %d dst: %d", dbits, sbits);
+
+    if (schannels && dchannels != schannels) {
+        dst->setInt32("channel-count", schannels);
+    }
+
+    if (srate && drate != srate) {
+        dst->setInt32("sample-rate", srate);
+    }
+
+    if (sbits && dbits != sbits) {
+        dst->setInt32("bits-per-sample", sbits);
+    }
+
+    return;
+}
+
+int32_t ExtendedUtils::getEncoderTypeFlags() {
+    int32_t flags = 0;
+
+    char mDeviceName[PROPERTY_VALUE_MAX];
+    property_get("ro.board.platform", mDeviceName, "0");
+    if (!strncmp(mDeviceName, "msm8909", 7)) {
+        flags |= OMXCodec::kHardwareCodecsOnly;
+    }
+
+    return flags;
+}
+
+void ExtendedUtils::cacheCaptureBuffers(sp<ICamera> camera, video_encoder encoder) {
+    if (camera != NULL) {
+        char mDeviceName[PROPERTY_VALUE_MAX];
+        property_get("ro.board.platform", mDeviceName, "0");
+        if (!strncmp(mDeviceName, "msm8909", 7)) {
+            int64_t token = IPCThreadState::self()->clearCallingIdentity();
+            String8 s = camera->getParameters();
+            CameraParameters params(s);
+            const char *enable;
+            if (encoder == VIDEO_ENCODER_H263 ||
+                encoder == VIDEO_ENCODER_MPEG_4_SP) {
+                enable = "1";
+            } else {
+                enable = "0";
+            }
+            params.set("cache-video-buffers", enable);
+            if (camera->setParameters(params.flatten()) != OK) {
+                ALOGE("Failed to enabled cached camera buffers");
+            }
+            IPCThreadState::self()->restoreCallingIdentity(token);
+        }
+    }
+}
+
 void ExtendedUtils::detectAndPostImage(const sp<ABuffer> accessUnit,
         const sp<AMessage> &notify) {
     if (accessUnit == NULL || notify == NULL)
@@ -1803,16 +2030,14 @@ void ExtendedUtils::showImageInNativeWindow(const sp<AMessage> &msg,
     size_t stride = cinfo.output_width * 2;
     size_t dataSize = stride * cinfo.output_height;
     sp<ABuffer> outBuffer = new ABuffer(dataSize);
-    size_t i = 0;
-    while (cinfo.output_scanline < cinfo.output_height) {
+    for (size_t i = 0; i < cinfo.output_height; i++) {
         JSAMPLE* rowptr = (JSAMPLE*)(outBuffer->data() + stride * i);
         int32_t row_count = jpeg_read_scanlines(&cinfo, &rowptr, 1);
-        if (0 == row_count) {
+        if (row_count == 0) {
            ALOGV("row_count = 0");
            cinfo.output_scanline = cinfo.output_height;
            break;
         }
-        i++;
     }
     size_t bufwidth = cinfo.output_width;
     size_t bufheight = cinfo.output_height;
@@ -1822,31 +2047,26 @@ void ExtendedUtils::showImageInNativeWindow(const sp<AMessage> &msg,
 
     int32_t err = 0;
 
-    err = native_window_set_usage(
-            nativeWindow.get(),
+    err = native_window_set_usage(nativeWindow.get(),
             GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_OFTEN
             | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_EXTERNAL_DISP);
     if (err != 0) {
         ALOGE("native_window_set_usage failed: %d", err);
         return;
     }
-    err = native_window_set_scaling_mode(
-            nativeWindow.get(),
+    err = native_window_set_scaling_mode(nativeWindow.get(),
             NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
     if (err != 0) {
         ALOGE("native_window_set_scaling_mode failed: %d", err);
         return;
     }
-    err = native_window_set_buffers_dimensions(
-            nativeWindow.get(),
-            bufwidth,
+    err = native_window_set_buffers_dimensions(nativeWindow.get(), bufwidth,
             bufheight);
     if (err != 0) {
         ALOGE("native_window_set_buffers_dimensions failed: %d", err);
         return;
     }
-    err = native_window_set_buffers_format(
-            nativeWindow.get(),
+    err = native_window_set_buffers_format(nativeWindow.get(),
             HAL_PIXEL_FORMAT_RGB_565);
     if (err != 0) {
         ALOGE("native_window_set_buffers_format failed: %d", err);
@@ -1951,6 +2171,16 @@ int32_t ExtendedUtils::HFR::getHFRCapabilities(
     return -1;
 }
 
+sp<MetaData> ExtendedUtils::MakeHEVCCodecSpecificData(const sp<ABuffer> &accessUnit) {
+    ARG_TOUCH(accessUnit);
+    return NULL;
+}
+
+bool ExtendedUtils::IsHevcIDR(const sp<ABuffer> &buffer) {
+    ARG_TOUCH(buffer);
+    return false;
+}
+
 bool ExtendedUtils::ShellProp::isAudioDisabled(bool isEncoder) {
     return false;
 }
@@ -1976,6 +2206,10 @@ void ExtendedUtils::ShellProp::getRtpPortRange(unsigned *start, unsigned *end) {
     *end = kDefaultRtpPortRangeEnd;
 }
 
+bool ExtendedUtils::ShellProp::isCustomHLSEnabled() {
+    return false;
+}
+
 void ExtendedUtils::setBFrames(
         OMX_VIDEO_PARAM_MPEG4TYPE &mpeg4type, const char* componentName) {
     ARG_TOUCH(mpeg4type);
@@ -1997,6 +2231,21 @@ bool ExtendedUtils::UseQCHWAACEncoder(audio_encoder Encoder,int32_t Channel,
     ARG_TOUCH(Channel);
     ARG_TOUCH(BitRate);
     ARG_TOUCH(SampleRate);
+    return false;
+}
+
+bool ExtendedUtils::isRAWFormat(const sp<MetaData> &meta) {
+    ARG_TOUCH(meta);
+    return false;
+}
+
+bool ExtendedUtils::isRAWFormat(const sp<AMessage> &format) {
+    ARG_TOUCH(format);
+    return false;
+}
+
+bool ExtendedUtils::UseQCHWAACDecoder(const char *mime) {
+    ARG_TOUCH(mime);
     return false;
 }
 
@@ -2098,6 +2347,11 @@ bool ExtendedUtils::checkDPFromVOLHeader(const uint8_t *data, size_t size) {
     return false;
 }
 
+int32_t ExtendedUtils::getEncoderTypeFlags() {
+    return false;
+}
+
+void ExtendedUtils::cacheCaptureBuffers(sp<ICamera> camera, video_encoder encoder) {}
 
 void ExtendedUtils::detectAndPostImage(const sp<ABuffer> accessUnit,
         const sp<AMessage> &notify) {
@@ -2142,6 +2396,21 @@ bool ExtendedUtils::isPcmOffloadEnabled() {
 bool ExtendedUtils::pcmOffloadException(const char* const mime) {
     ARG_TOUCH(mime);
     return true;
+}
+
+sp<MetaData> ExtendedUtils::createPCMMetaFromSource(
+                const sp<MetaData> &sMeta) {
+    ARG_TOUCH(sMeta);
+    sp<MetaData> tPCMMeta = new MetaData;
+    return tPCMMeta;
+}
+
+void ExtendedUtils::overWriteAudioFormat(
+                sp<AMessage> &dst, const sp<AMessage> &src)
+{
+    ARG_TOUCH(dst);
+    ARG_TOUCH(src);
+    return;
 }
 
 } // namespace android

@@ -38,11 +38,11 @@ LOCAL_SHARED_LIBRARIES :=       \
     libstagefright              \
     libstagefright_foundation   \
     libstagefright_httplive     \
-    libstagefright_httplivecustom \
     libstagefright_omx          \
     libstagefright_wfd          \
     libutils                    \
     libvorbisidec               \
+    libdrmframework             \
 
 LOCAL_STATIC_LIBRARIES :=       \
     libstagefright_nuplayer     \

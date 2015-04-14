@@ -2645,6 +2645,11 @@ bool AudioFlinger::PlaybackThread::threadLoop()
                     ssize_t ret = threadLoop_write();
                     if (ret < 0) {
                         mBytesRemaining = 0;
+#ifdef QCOM_DIRECTTRACK
+                    } else if(ret > mBytesRemaining) {
+                        mBytesWritten += mBytesRemaining;
+                        mBytesRemaining = 0;
+#endif
                     } else {
                         mBytesWritten += ret;
                         mBytesRemaining -= ret;
@@ -2851,11 +2856,15 @@ AudioFlinger::MixerThread::MixerThread(const sp<AudioFlinger>& audioFlinger, Aud
     }
     if (initFastMixer) {
         audio_format_t fastMixerFormat;
+#ifndef QCOM_DIRECTTRACK
         if (mMixerBufferEnabled && mEffectBufferEnabled) {
             fastMixerFormat = AUDIO_FORMAT_PCM_FLOAT;
         } else {
+#endif
             fastMixerFormat = AUDIO_FORMAT_PCM_16_BIT;
+#ifndef QCOM_DIRECTTRACK
         }
+#endif
         if (mFormat != fastMixerFormat) {
             // change our Sink format to accept our intermediate precision
             mFormat = fastMixerFormat;
@@ -3324,6 +3333,12 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::MixerThread::prepareTrac
                     // remove from active list, but state remains ACTIVE [confusing but true]
                     isActive = false;
                     break;
+                }
+                else {
+                   if (recentEmpty == 0) {
+                   // no, then ignore the partial underruns as they are allowed indefinitely
+                      break;
+                   }
                 }
                 // fall through
             case TrackBase::STOPPING_2:
@@ -4059,7 +4074,7 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::DirectOutputThread::prep
         }
 
         if ((track->framesReady() >= minFrames) && track->isReady() && !track->isPaused() &&
-                !track->isStopping_2() && !track->isStopped())
+                !track->isStopping() && !track->isStopped())
         {
             ALOGVV("track %d s=%08x [OK]", track->name(), cblk->mServer);
 
@@ -4691,8 +4706,8 @@ void AudioFlinger::OffloadThread::onFatalError()
 {
     Mutex::Autolock _l(mLock);
 
-   // call invalidate, to recreate track on fatal error
-   invalidateTracks_l(AUDIO_STREAM_MUSIC);
+    // call invalidate, to recreate track on fatal error
+    invalidateTracks_l(AUDIO_STREAM_MUSIC);
 }
 
 // ----------------------------------------------------------------------------
@@ -4721,6 +4736,8 @@ void AudioFlinger::DuplicatingThread::threadLoop_mix()
     } else {
         if (mMixerBufferValid) {
             memset(mMixerBuffer, 0, mMixerBufferSize);
+        } else if (mEffectBufferValid) {
+            memset(mEffectBuffer, 0, mEffectBufferSize);
         } else {
             memset(mSinkBuffer, 0, mSinkBufferSize);
         }
@@ -4742,7 +4759,11 @@ void AudioFlinger::DuplicatingThread::threadLoop_sleepTime()
     } else if (mBytesWritten != 0) {
         if (mMixerStatus == MIXER_TRACKS_ENABLED) {
             writeFrames = mNormalFrameCount;
-            memset(mSinkBuffer, 0, mSinkBufferSize);
+            if (mMixerBufferValid) {
+                memset(mMixerBuffer, 0, mMixerBufferSize);
+            } else {
+                memset(mSinkBuffer, 0, mSinkBufferSize);
+            }
         } else {
             // flush remaining overflow buffers in output tracks
             writeFrames = 0;

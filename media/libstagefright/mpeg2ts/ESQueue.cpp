@@ -28,8 +28,12 @@
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/Utils.h>
+#ifdef ENABLE_AV_ENHANCEMENTS
+#include <QCMetaData.h>
+#endif
 
 #include "include/avc_utils.h"
+#include "include/ExtendedUtils.h"
 
 #include <inttypes.h>
 #include <netinet/in.h>
@@ -63,8 +67,6 @@ static unsigned parseAC3SyncFrame(
         const uint8_t *ptr, size_t size, sp<MetaData> *metaData) {
     static const unsigned channelCountTable[] = {2, 1, 2, 3, 3, 4, 4, 5};
     static const unsigned samplingRateTable[] = {48000, 44100, 32000};
-    static const unsigned rates[] = {32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256,
-            320, 384, 448, 512, 576, 640};
 
     static const unsigned frameSizeTable[19][3] = {
         { 64, 69, 96 },
@@ -89,7 +91,6 @@ static unsigned parseAC3SyncFrame(
     };
 
     ABitReader bits(ptr, size);
-    unsigned syncStartPos = 0;  // in bytes
     if (bits.numBitsLeft() < 16) {
         return 0;
     }
@@ -121,11 +122,11 @@ static unsigned parseAC3SyncFrame(
         return 0;
     }
 
-    unsigned bsmod = bits.getBits(3);
+    unsigned bsmod __unused = bits.getBits(3);
     unsigned acmod = bits.getBits(3);
-    unsigned cmixlev = 0;
-    unsigned surmixlev = 0;
-    unsigned dsurmod = 0;
+    unsigned cmixlev __unused = 0;
+    unsigned surmixlev __unused = 0;
+    unsigned dsurmod __unused = 0;
 
     if ((acmod & 1) > 0 && acmod != 1) {
         if (bits.numBitsLeft() < 2) {
@@ -242,6 +243,7 @@ status_t ElementaryStreamQueue::appendData(
     if (mBuffer == NULL || mBuffer->size() == 0) {
         switch (mMode) {
             case H264:
+            case H265:
             case MPEG_VIDEO:
             {
 #if 0
@@ -442,7 +444,7 @@ status_t ElementaryStreamQueue::appendData(
 }
 
 sp<ABuffer> ElementaryStreamQueue::dequeueAccessUnit() {
-    if ((mFlags & kFlag_AlignedData) && mMode == H264) {
+    if (((mFlags & kFlag_AlignedData) && mMode == H264) || mMode == H265) {
         if (mRangeInfos.empty()) {
             return NULL;
         }
@@ -461,7 +463,18 @@ sp<ABuffer> ElementaryStreamQueue::dequeueAccessUnit() {
         mBuffer->setRange(0, mBuffer->size() - info.mLength);
 
         if (mFormat == NULL) {
-            mFormat = MakeAVCCodecSpecificData(accessUnit);
+            if (mMode == H264) {
+                mFormat = MakeAVCCodecSpecificData(accessUnit);
+            } else if (mMode == H265) {
+                mFormat = ExtendedUtils::MakeHEVCCodecSpecificData(accessUnit);
+#ifdef ENABLE_AV_ENHANCEMENTS
+                if (mFormat != NULL) {
+                    // Unlike H264, we do not require HEVC data to be aligned.
+                    // To handle this, let the decoder do the frame parsing.
+                    mFormat->setInt32(kKeyUseArbitraryMode, 1);
+                }
+#endif
+            }
         }
 
         return accessUnit;
@@ -470,6 +483,8 @@ sp<ABuffer> ElementaryStreamQueue::dequeueAccessUnit() {
     switch (mMode) {
         case H264:
             return dequeueAccessUnitH264();
+        case H265:
+            return dequeueAccessUnitH265();
         case AAC:
             return dequeueAccessUnitAAC();
         case AC3:
@@ -540,7 +555,7 @@ sp<ABuffer> ElementaryStreamQueue::dequeueAccessUnitPCMAudio() {
     CHECK_EQ(bits.getBits(8), 0xa0);
     unsigned numAUs = bits.getBits(8);
     bits.skipBits(8);
-    unsigned quantization_word_length = bits.getBits(2);
+    unsigned quantization_word_length __unused = bits.getBits(2);
     unsigned audio_sampling_frequency = bits.getBits(3);
     unsigned num_channels = bits.getBits(3);
 
@@ -618,7 +633,7 @@ sp<ABuffer> ElementaryStreamQueue::dequeueAccessUnitAAC() {
 
         CHECK_EQ(bits.getBits(12), 0xfffu);
         bits.skipBits(3);  // ID, layer
-        bool protection_absent = bits.getBits(1) != 0;
+        bool protection_absent __unused = bits.getBits(1) != 0;
 
         if (mFormat == NULL) {
             unsigned profile = bits.getBits(2);
@@ -668,7 +683,7 @@ sp<ABuffer> ElementaryStreamQueue::dequeueAccessUnitAAC() {
             return NULL;
         }
 
-        size_t headerSize = protection_absent ? 7 : 9;
+        size_t headerSize __unused = protection_absent ? 7 : 9;
 
         offset += aac_frame_length;
         // TODO: move back to concatenation when codec can support arbitrary input buffers.
@@ -768,6 +783,12 @@ struct NALPosition {
     size_t nalOffset;
     size_t nalSize;
 };
+
+sp<ABuffer> ElementaryStreamQueue::dequeueAccessUnitH265() {
+    ALOGE("Should not be here - frame parsing is done in decoder");
+    TRESPASS();
+    return NULL;
+}
 
 sp<ABuffer> ElementaryStreamQueue::dequeueAccessUnitH264() {
     const uint8_t *data = mBuffer->data();
